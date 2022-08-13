@@ -230,9 +230,11 @@ impl<T> Scratch<T> {
         self.space.resize_with(new_len, || None);
     }
 
-    fn space(&mut self, d: usize) -> &mut Option<T> {
+    /// # Safety
+    /// Must have called reserve before hand
+    unsafe fn space(&mut self, d: usize) -> &mut Option<T> {
         // Safety: space is guaranteed to be available (see reserve)
-        unsafe { self.space.get_unchecked_mut(d) }
+        self.space.get_unchecked_mut(d)
     }
 }
 
@@ -358,9 +360,7 @@ impl<T: Ord> Heap<T> {
                 }
                 self.children.append(&mut other.children);
                 self.scratch.reserve(self.len + other.len);
-                self.len += other.len;
-
-                other.len = 0;
+                self.len += std::mem::replace(&mut other.len, 0);
             }
             // if other has values but self does not,
             // swap the whole heaps to make other empty as promised.
@@ -420,19 +420,6 @@ impl<T: Ord> Heap<T> {
 
     /// phase2 - merge top level nodes with the same degree (to keep the heap logarithmic in size)
     fn phase2(&mut self) {
-        fn merge_or_insert<T: Ord>(
-            current: Box<ll::Node<T>>,
-            d: &mut Option<Box<ll::Node<T>>>,
-        ) -> Option<Box<ll::Node<T>>> {
-            // if we have a duplicate degree, then remove and merge
-            // else store the current node at that degree
-            if let Some(v) = d.take() {
-                Some(current.merge(v))
-            } else {
-                d.replace(current)
-            }
-        }
-
         debug_assert!(
             self.scratch.space.iter().flatten().next().is_none(),
             "scratch space should be empty before phase2"
@@ -440,10 +427,12 @@ impl<T: Ord> Heap<T> {
 
         while let Some(mut current) = self.children.pop_front_node() {
             loop {
-                let d = self.scratch.space(current.degree());
-                if let Some(c) = merge_or_insert(current, d) {
-                    current = c;
+                // Safety: reserve called by `push`
+                let d = unsafe { self.scratch.space(current.degree()) };
+                if let Some(v) = d.take() {
+                    current = current.merge(v);
                 } else {
+                    d.replace(current);
                     break;
                 }
             }
