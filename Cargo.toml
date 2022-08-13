@@ -1,8 +1,8 @@
 [package]
 name = "fibonacii-heap"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
-description = "Efficient array binary operations"
+description = "Priority queue implemeted using a Fibonacii Heap"
 repository = "https://github.com/conradludgate/fibonacii-heap"
 keywords = ["algorithms", "data-structures", "priority-queue"]
 license-file = "LICENSE"

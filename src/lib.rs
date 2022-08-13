@@ -352,20 +352,20 @@ impl<T: Ord> Heap<T> {
     ///
     /// Cost is *O*(1) in the worst case.
     pub fn merge(&mut self, other: &mut Self) {
-        match (self.peek(), other.peek()) {
-            (Some(x), Some(y)) => {
+        match (&mut self.children.0, other.children.0.take()) {
+            (Some(x), Some(mut y)) => {
                 // swap so self is the minimum heap
-                if x > y {
-                    std::mem::swap(self, other);
+                if x.first() > y.first() {
+                    std::mem::swap(x, &mut y);
                 }
-                self.children.append(&mut other.children);
+                x.append(y);
                 self.scratch.reserve(self.len + other.len);
                 self.len += std::mem::replace(&mut other.len, 0);
             }
-            // if other has values but self does not,
-            // swap the whole heaps to make other empty as promised.
-            (None, Some(_)) => std::mem::swap(self, other),
-            // other is already drained
+            (None, Some(y)) => {
+                other.children.0 = Some(y);
+                std::mem::swap(self, other);
+            }
             (Some(_) | None, None) => {}
         }
     }
