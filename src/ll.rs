@@ -26,7 +26,7 @@ impl<T> Node<T> {
     }
 
     pub fn degree(&self) -> usize {
-        self.children.0.as_ref().map_or_else(|| 0, |l| l.len.get())
+        self.children.len()
     }
 
     pub fn into_inner(self) -> T {
@@ -60,8 +60,8 @@ impl<T> LinkedListTree<T> {
     }
 
     pub fn append_from_node(&mut self, other: &mut Node<T>) {
-        match (self.0.as_mut(), other.children.0.as_mut()) {
-            (None, Some(_)) => std::mem::swap(self, &mut other.children),
+        match (self.0.as_mut(), other.children.0.take()) {
+            (None, Some(c)) => self.0 = Some(c),
             (Some(c1), Some(c2)) => c1.append(c2),
             (Some(_) | None, None) => {}
         }
@@ -69,32 +69,6 @@ impl<T> LinkedListTree<T> {
 
     #[inline]
     pub fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
-        // This method takes care not to create mutable references to whole nodes,
-        // to maintain validity of aliasing pointers into `element`.
-
-        // c -> a -> b -> c -> a
-
-        // into
-        // c -> b -> c -> b
-
-        // b.next = a;
-        // b.prev = a;
-        // a.next = b;
-        // a.prev = b;
-
-        // head = b;
-        // node = b;
-        // head = b.next; // a
-        // b.next = None;
-
-        // prev = b.prev; // a
-        // b.prev = None;
-
-        // a -> b -> a -> b
-
-        // into
-        // a
-
         match self.0.take() {
             Some(mut this) => unsafe {
                 match this.head.as_mut().next.take() {
@@ -109,29 +83,6 @@ impl<T> LinkedListTree<T> {
             },
             None => None,
         }
-
-        // unsafe {
-        //  }
-
-        // self.head
-
-        // self.head.map(|node| unsafe {
-        //     let mut node = Box::from_raw(node.as_ptr());
-        //     self.head = node.next.take();
-        //     let prev = node.prev.take();
-
-        //     if let Some(mut head) = self.head {
-        //         if prev == self.head {
-        //             head.as_mut().prev = None;
-        //             head.as_mut().next = None;
-        //         } else {
-        //             head.as_mut().prev = prev;
-        //         }
-        //     }
-
-        //     self.len -= 1;
-        //     node
-        // })
     }
 
     pub const fn new() -> Self {
@@ -152,7 +103,6 @@ impl<T> LinkedListTree<T> {
 }
 
 pub struct LinkedListTreeInner<T> {
-    // tree only needs head as it is a circular list
     head: NonNull<Node<T>>,
     tail: NonNull<Node<T>>,
     len: NonZeroUsize,
@@ -174,24 +124,23 @@ impl<T> LinkedListTreeInner<T> {
         unsafe { self.head.as_ref() }.get()
     }
 
-    pub fn append(&mut self, other: &mut Self) {
+    // pass by value because we don't want dangling pointers :)
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn append(&mut self, other: Self) {
         unsafe {
             self.tail.as_mut().next = Some(other.head);
+            self.tail = other.tail;
             self.len = NonZeroUsize::new_unchecked(self.len.get() + other.len.get());
         }
     }
-
-    // pub fn append_from_node(&mut self, other: &mut Node<T>) {
-    //     if let Some(children) = other.children.0.as_mut() {
-    //         self.append(children);
-    //     }
-    // }
 
     /// Adds the given node to the back of the list.
     #[inline]
     pub fn push_back_node(&mut self, node: Box<Node<T>>) {
         unsafe {
-            self.tail.as_mut().next = Some(Box::leak(node).into());
+            let node = Box::leak(node).into();
+            self.tail.as_mut().next = Some(node);
+            self.tail = node;
             self.len = NonZeroUsize::new_unchecked(self.len.get() + 1);
         }
     }
@@ -240,10 +189,11 @@ impl<T> Drop for LinkedListTree<T> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::LinkedList,
         panic::catch_unwind,
         sync::{atomic::AtomicUsize, Arc},
     };
+
+    use crate::ll::{LinkedListTree, Node};
 
     #[test]
     fn drop() {
@@ -251,21 +201,47 @@ mod tests {
         struct D(Arc<AtomicUsize>);
         impl Drop for D {
             fn drop(&mut self) {
-                assert_ne!(
-                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
-                    0,
-                    "panic in drop"
-                );
+                assert_ne!(self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0,);
             }
         }
         let d = D::default();
-        let mut ll = LinkedList::new();
-        ll.push_back(d.clone());
-        ll.push_back(d.clone());
+        let mut ll = LinkedListTree::new();
+        ll.push_back_node(Box::new(Node::new(d.clone())));
+        ll.push_back_node(Box::new(Node::new(d.clone())));
 
         catch_unwind(|| std::mem::drop(ll)).unwrap_err();
 
         // both were still dropped, despite the panic
         assert_eq!(d.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn push_pop() {
+        let mut ll = LinkedListTree::new();
+        ll.push_back_node(Box::new(Node::new(1)));
+        ll.push_back_node(Box::new(Node::new(2)));
+
+        assert_eq!(ll.pop_front_node().unwrap().element, 1);
+        assert_eq!(ll.pop_front_node().unwrap().element, 2);
+        assert!(ll.pop_front_node().is_none());
+    }
+
+    #[test]
+    fn append() {
+        let mut ll1 = LinkedListTree::new();
+        ll1.push_back_node(Box::new(Node::new(1)));
+        ll1.push_back_node(Box::new(Node::new(2)));
+
+        let mut ll2 = LinkedListTree::new();
+        ll2.push_back_node(Box::new(Node::new(3)));
+        ll2.push_back_node(Box::new(Node::new(4)));
+
+        ll1.0.as_mut().unwrap().append(ll2.0.take().unwrap());
+
+        assert_eq!(ll1.pop_front_node().unwrap().element, 1);
+        assert_eq!(ll1.pop_front_node().unwrap().element, 2);
+        assert_eq!(ll1.pop_front_node().unwrap().element, 3);
+        assert_eq!(ll1.pop_front_node().unwrap().element, 4);
+        assert!(ll1.pop_front_node().is_none());
     }
 }

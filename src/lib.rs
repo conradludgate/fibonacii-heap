@@ -358,12 +358,15 @@ impl<T: Ord> Heap<T> {
                 if x.first() > y.first() {
                     std::mem::swap(x, &mut y);
                 }
-                x.append(&mut y);
+                x.append(y);
                 self.scratch.reserve(self.len + other.len);
                 self.len += std::mem::replace(&mut other.len, 0);
             }
-            (None, Some(_)) => std::mem::swap(self, other),
-            (Some(_) | None, None) => todo!(),
+            (None, Some(y)) => {
+                other.children.0 = Some(y);
+                std::mem::swap(self, other);
+            }
+            (Some(_) | None, None) => {}
         }
     }
 
@@ -567,3 +570,4 @@ mod tests {
         check(&mut heap, 0..0);
     }
 }
+
