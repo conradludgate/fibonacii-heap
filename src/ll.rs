@@ -4,14 +4,13 @@
 //! This differs from [`std::collections::LinkedList`] because
 //! [`Node`] contains children as a sub-linked list.
 
-use std::{marker::PhantomData, mem, ptr::NonNull};
+use std::{marker::PhantomData, mem, num::NonZeroUsize, ptr::NonNull};
 
 pub struct Node<T> {
     children: LinkedListTree<T>,
     // unused atm, for decrease_key
     // _marked: bool,
     next: Option<NonNull<Node<T>>>,
-    prev: Option<NonNull<Node<T>>>,
 
     element: T,
 }
@@ -23,12 +22,11 @@ impl<T> Node<T> {
             // _marked: false,
             element: t,
             next: None,
-            prev: None,
         }
     }
 
     pub fn degree(&self) -> usize {
-        self.children.len()
+        self.children.0.as_ref().map_or_else(|| 0, |l| l.len.get())
     }
 
     pub fn into_inner(self) -> T {
@@ -51,80 +49,150 @@ impl<T: Ord> Node<T> {
     }
 }
 
-pub struct LinkedListTree<T> {
-    head: Option<NonNull<Node<T>>>,
-    tail: Option<NonNull<Node<T>>>,
-    len: usize,
-    marker: PhantomData<Box<Node<T>>>,
-}
+pub struct LinkedListTree<T>(pub Option<LinkedListTreeInner<T>>);
 
 impl<T> LinkedListTree<T> {
-    pub const fn new() -> Self {
-        LinkedListTree {
-            head: None,
-            tail: None,
-            len: 0,
-            marker: PhantomData,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn first(&self) -> Option<&T> {
-        self.head.map(|p| {
-            // SAFETY: We have shared ref of the entire heap -
-            // so we know that no one is mutating this pointer
-            unsafe { p.as_ref().get() }
-        })
-    }
-
-    pub fn append(&mut self, other: &mut Self) {
-        match self.tail {
-            None => mem::swap(self, other),
-            Some(mut tail) => {
-                // `as_mut` is okay here because we have exclusive access to the entirety
-                // of both lists.
-                if let Some(mut other_head) = other.head.take() {
-                    unsafe {
-                        tail.as_mut().next = Some(other_head);
-                        other_head.as_mut().prev = Some(tail);
-                    }
-
-                    self.tail = other.tail.take();
-                    self.len += mem::replace(&mut other.len, 0);
-                }
-            }
+    pub fn push_back_node(&mut self, node: Box<Node<T>>) {
+        match &mut self.0 {
+            Some(c) => c.push_back_node(node),
+            None => self.0 = Some(LinkedListTreeInner::new(node)),
         }
     }
 
     pub fn append_from_node(&mut self, other: &mut Node<T>) {
-        self.append(&mut other.children);
+        match (self.0.as_mut(), other.children.0.as_mut()) {
+            (None, Some(_)) => std::mem::swap(self, &mut other.children),
+            (Some(c1), Some(c2)) => c1.append(c2),
+            (Some(_) | None, None) => {}
+        }
     }
+
+    #[inline]
+    pub fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
+        // This method takes care not to create mutable references to whole nodes,
+        // to maintain validity of aliasing pointers into `element`.
+
+        // c -> a -> b -> c -> a
+
+        // into
+        // c -> b -> c -> b
+
+        // b.next = a;
+        // b.prev = a;
+        // a.next = b;
+        // a.prev = b;
+
+        // head = b;
+        // node = b;
+        // head = b.next; // a
+        // b.next = None;
+
+        // prev = b.prev; // a
+        // b.prev = None;
+
+        // a -> b -> a -> b
+
+        // into
+        // a
+
+        match self.0.take() {
+            Some(mut this) => unsafe {
+                match this.head.as_mut().next.take() {
+                    Some(next_head) => {
+                        let node = std::mem::replace(&mut this.head, next_head);
+                        this.len = NonZeroUsize::new_unchecked(this.len.get() + 1);
+                        self.0 = Some(this);
+                        Some(Box::from_raw(node.as_ptr()))
+                    }
+                    None => Some(Box::from_raw(this.head.as_ptr())),
+                }
+            },
+            None => None,
+        }
+
+        // unsafe {
+        //  }
+
+        // self.head
+
+        // self.head.map(|node| unsafe {
+        //     let mut node = Box::from_raw(node.as_ptr());
+        //     self.head = node.next.take();
+        //     let prev = node.prev.take();
+
+        //     if let Some(mut head) = self.head {
+        //         if prev == self.head {
+        //             head.as_mut().prev = None;
+        //             head.as_mut().next = None;
+        //         } else {
+        //             head.as_mut().prev = prev;
+        //         }
+        //     }
+
+        //     self.len -= 1;
+        //     node
+        // })
+    }
+
+    pub const fn new() -> Self {
+        Self(None)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.as_ref().map_or_else(|| 0, |l| l.len.get())
+    }
+
+    pub fn first(&self) -> Option<&T> {
+        self.0.as_ref().map(LinkedListTreeInner::first)
+    }
+}
+
+pub struct LinkedListTreeInner<T> {
+    // tree only needs head as it is a circular list
+    head: NonNull<Node<T>>,
+    tail: NonNull<Node<T>>,
+    len: NonZeroUsize,
+    marker: PhantomData<Box<Node<T>>>,
+}
+
+impl<T> LinkedListTreeInner<T> {
+    pub fn new(node: Box<Node<T>>) -> Self {
+        let node = Box::leak(node).into();
+        Self {
+            head: node,
+            tail: node,
+            len: NonZeroUsize::new(1).unwrap(),
+            marker: PhantomData,
+        }
+    }
+
+    pub fn first(&self) -> &T {
+        unsafe { self.head.as_ref() }.get()
+    }
+
+    pub fn append(&mut self, other: &mut Self) {
+        unsafe {
+            self.tail.as_mut().next = Some(other.head);
+            self.len = NonZeroUsize::new_unchecked(self.len.get() + other.len.get());
+        }
+    }
+
+    // pub fn append_from_node(&mut self, other: &mut Node<T>) {
+    //     if let Some(children) = other.children.0.as_mut() {
+    //         self.append(children);
+    //     }
+    // }
 
     /// Adds the given node to the back of the list.
     #[inline]
-    pub fn push_back_node(&mut self, mut node: Box<Node<T>>) {
-        // This method takes care not to create mutable references to whole nodes,
-        // to maintain validity of aliasing pointers into `element`.
+    pub fn push_back_node(&mut self, node: Box<Node<T>>) {
         unsafe {
-            node.next = None;
-            node.prev = self.tail;
-            let node = Some(Box::leak(node).into());
-
-            match self.tail {
-                None => self.head = node,
-                // Not creating new mutable (unique!) references overlapping `element`.
-                Some(mut tail) => tail.as_mut().next = node,
-            }
-
-            self.tail = node;
-            self.len += 1;
+            self.tail.as_mut().next = Some(Box::leak(node).into());
+            self.len = NonZeroUsize::new_unchecked(self.len.get() + 1);
         }
     }
 
@@ -134,49 +202,19 @@ impl<T> LinkedListTree<T> {
     /// The list must have at least 1 element
     #[inline]
     unsafe fn push_front_node(&mut self, mut node: Box<Node<T>>) {
-        debug_assert!(!self.is_empty());
-
-        // This method takes care not to create mutable references to whole nodes,
-        // to maintain validity of aliasing pointers into `element`.
-        node.next = self.head;
-        node.prev = None;
-        let node = Box::leak(node).into();
-
-        // Not creating new mutable (unique!) references overlapping `element`.
-        self.head.replace(node).unwrap_unchecked().as_mut().prev = Some(node);
-
-        self.len += 1;
-    }
-
-    #[inline]
-    pub fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
-        // This method takes care not to create mutable references to whole nodes,
-        // to maintain validity of aliasing pointers into `element`.
-        self.head.map(|node| unsafe {
-            let node = Box::from_raw(node.as_ptr());
-            self.head = node.next;
-
-            match self.head {
-                None => self.tail = None,
-                // Not creating new mutable (unique!) references overlapping `element`.
-                Some(mut head) => head.as_mut().prev = None,
-            }
-
-            self.len -= 1;
-            node
-        })
+        node.next = Some(self.head);
+        self.head = Box::leak(node).into();
+        self.len = NonZeroUsize::new_unchecked(self.len.get() + 1);
     }
 }
 
 impl<T: Ord> LinkedListTree<T> {
     /// inserts the node into the linked list. Preserving the min heap proprety
     pub fn insert_node(&mut self, node: Box<Node<T>>) {
-        match self.first() {
-            // push front if this is the new min
-            // safety: list has at least one node
-            Some(min) if min > node.get() => unsafe { self.push_front_node(node) },
-            // push back if we already have our min
-            _ => self.push_back_node(node),
+        match &mut self.0 {
+            Some(c) if c.first() < node.get() => c.push_back_node(node),
+            Some(c) => unsafe { c.push_front_node(node) },
+            None => self.0 = Some(LinkedListTreeInner::new(node)),
         }
     }
 }
