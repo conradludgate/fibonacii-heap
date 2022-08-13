@@ -4,7 +4,7 @@
 //! This differs from [`std::collections::LinkedList`] because
 //! [`Node`] contains children as a sub-linked list.
 
-use std::{marker::PhantomData, mem, ptr::NonNull};
+use std::{fmt, marker::PhantomData, mem, ptr::NonNull};
 
 pub struct Node<T> {
     children: LinkedListTree<T>,
@@ -47,6 +47,10 @@ impl<T: Ord> Node<T> {
     pub fn get(&self) -> &T {
         &self.element
     }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        &mut self.element
+    }
 }
 
 pub struct LinkedListTree<T> {
@@ -58,12 +62,7 @@ pub struct LinkedListTree<T> {
 
 impl<T> Default for LinkedListTree<T> {
     fn default() -> Self {
-        Self {
-            head: Default::default(),
-            tail: Default::default(),
-            len: Default::default(),
-            marker: Default::default(),
-        }
+        Self::new()
     }
 }
 
@@ -161,6 +160,16 @@ impl<T> LinkedListTree<T> {
     /// Provides a cursor with editing operations at the front element.
     ///
     /// The cursor is pointing to the "ghost" non-element if the list is empty.
+    pub fn cursor_front(&self) -> Cursor<'_, T> {
+        Cursor {
+            current: self.head,
+            list: self,
+        }
+    }
+
+    /// Provides a cursor with editing operations at the front element.
+    ///
+    /// The cursor is pointing to the "ghost" non-element if the list is empty.
     pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T> {
         CursorMut {
             current: self.head,
@@ -189,7 +198,6 @@ impl<T> LinkedListTree<T> {
             // this node is the tail node
             None => self.tail = node.prev,
         };
-
         self.len -= 1;
     }
 }
@@ -224,9 +232,49 @@ impl<T> Drop for LinkedListTree<T> {
 /// Cursors always rest between two elements in the list, and index in a logically circular way.
 /// To accommodate this, there is a "ghost" non-element that yields `None` between the head and
 /// tail of the list.
+pub struct Cursor<'a, T: 'a> {
+    current: Option<NonNull<Node<T>>>,
+    list: &'a LinkedListTree<T>,
+}
+
+/// A cursor over a `LinkedList` with editing operations.
+///
+/// A `Cursor` is like an iterator, except that it can freely seek back-and-forth, and can
+/// safely mutate the list during iteration. This is because the lifetime of its yielded
+/// references is tied to its own lifetime, instead of just the underlying list. This means
+/// cursors cannot yield multiple elements at once.
+///
+/// Cursors always rest between two elements in the list, and index in a logically circular way.
+/// To accommodate this, there is a "ghost" non-element that yields `None` between the head and
+/// tail of the list.
 pub struct CursorMut<'a, T: 'a> {
     current: Option<NonNull<Node<T>>>,
     list: &'a mut LinkedListTree<T>,
+}
+
+impl<'a, T> Cursor<'a, T> {
+    /// Moves the cursor to the next element of the `LinkedList`.
+    ///
+    /// If the cursor is pointing to the "ghost" non-element then this will move it to
+    /// the first element of the `LinkedList`. If it is pointing to the last
+    /// element of the `LinkedList` then this will move it to the "ghost" non-element.
+    pub fn move_next(&mut self) {
+        match self.current.take() {
+            // We had no current element; the cursor was sitting at the start position
+            // Next element should be the head of the list
+            None => {
+                self.current = self.list.head;
+            }
+            // We had a previous element, so let's go to its next
+            Some(current) => unsafe {
+                self.current = current.as_ref().next;
+            },
+        }
+    }
+
+    pub fn current_node(&self) -> Option<&'a Node<T>> {
+        unsafe { self.current.map(|current| &(*current.as_ptr())) }
+    }
 }
 
 impl<'a, T> CursorMut<'a, T> {
@@ -245,5 +293,28 @@ impl<'a, T> CursorMut<'a, T> {
             let unlinked_node = Box::from_raw(unlinked_node.as_ptr());
             Some(unlinked_node)
         }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for LinkedListTree<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut list = f.debug_list();
+        let mut cursor = self.cursor_front();
+        while let Some(c) = cursor.current_node() {
+            list.entry(c);
+            cursor.move_next();
+        }
+        list.finish()
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for Node<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("element", &self.element)
+            .field("children", &self.children)
+            .field("next", &self.next)
+            .field("prev", &self.prev)
+            .finish()
     }
 }
