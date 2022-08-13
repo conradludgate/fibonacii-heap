@@ -47,10 +47,6 @@ impl<T: Ord> Node<T> {
     pub fn get(&self) -> &T {
         &self.element
     }
-
-    pub fn get_mut(&mut self) -> &mut T {
-        &mut self.element
-    }
 }
 
 pub struct LinkedListTree<T> {
@@ -104,11 +100,11 @@ impl<T> LinkedListTree<T> {
     }
 
     pub fn append_from_node(&mut self, other: &mut Node<T>) {
-        self.append(&mut other.children)
+        self.append(&mut other.children);
     }
 
     /// Adds the given node to the back of the list.
-    pub fn push_back_node(&mut self, mut node: Box<Node<T>>) -> Option<NonNull<Node<T>>> {
+    pub fn push_back_node(&mut self, mut node: Box<Node<T>>) -> NonNull<Node<T>> {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
         unsafe {
@@ -125,11 +121,11 @@ impl<T> LinkedListTree<T> {
             self.tail = node;
             self.len += 1;
 
-            node
+            node.unwrap_unchecked()
         }
     }
 
-    fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
+    pub fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
         self.head.map(|node| unsafe {
@@ -167,16 +163,6 @@ impl<T> LinkedListTree<T> {
         }
     }
 
-    /// Provides a cursor with editing operations at the front element.
-    ///
-    /// The cursor is pointing to the "ghost" non-element if the list is empty.
-    pub fn cursor_front_mut(&mut self) -> CursorMut<'_, T> {
-        CursorMut {
-            current: self.head,
-            list: self,
-        }
-    }
-
     /// Unlinks the specified node from the current list.
     ///
     /// Warning: this will not check that the provided node belongs to the current list.
@@ -188,13 +174,13 @@ impl<T> LinkedListTree<T> {
 
         // Not creating new mutable (unique!) references overlapping `element`.
         match node.prev {
-            Some(prev) => (*prev.as_ptr()).next = node.next,
+            Some(mut prev) => prev.as_mut().next = node.next,
             // this node is the head node
             None => self.head = node.next,
         };
 
         match node.next {
-            Some(next) => (*next.as_ptr()).prev = node.prev,
+            Some(mut next) => next.as_mut().prev = node.prev,
             // this node is the tail node
             None => self.tail = node.prev,
         };
@@ -237,21 +223,6 @@ pub struct Cursor<'a, T: 'a> {
     list: &'a LinkedListTree<T>,
 }
 
-/// A cursor over a `LinkedList` with editing operations.
-///
-/// A `Cursor` is like an iterator, except that it can freely seek back-and-forth, and can
-/// safely mutate the list during iteration. This is because the lifetime of its yielded
-/// references is tied to its own lifetime, instead of just the underlying list. This means
-/// cursors cannot yield multiple elements at once.
-///
-/// Cursors always rest between two elements in the list, and index in a logically circular way.
-/// To accommodate this, there is a "ghost" non-element that yields `None` between the head and
-/// tail of the list.
-pub struct CursorMut<'a, T: 'a> {
-    current: Option<NonNull<Node<T>>>,
-    list: &'a mut LinkedListTree<T>,
-}
-
 impl<'a, T> Cursor<'a, T> {
     /// Moves the cursor to the next element of the `LinkedList`.
     ///
@@ -274,25 +245,6 @@ impl<'a, T> Cursor<'a, T> {
 
     pub fn current_node(&self) -> Option<&'a Node<T>> {
         unsafe { self.current.map(|current| &(*current.as_ptr())) }
-    }
-}
-
-impl<'a, T> CursorMut<'a, T> {
-    /// Removes the current element from the `LinkedList`.
-    ///
-    /// The element that was removed is returned, and the cursor is
-    /// moved to point to the next element in the `LinkedList`.
-    ///
-    /// If the cursor is currently pointing to the "ghost" non-element then no element
-    /// is removed and `None` is returned.
-    pub fn remove_current(&mut self) -> Option<Box<Node<T>>> {
-        let unlinked_node = self.current?;
-        unsafe {
-            self.current = unlinked_node.as_ref().next;
-            self.list.unlink_node(unlinked_node);
-            let unlinked_node = Box::from_raw(unlinked_node.as_ptr());
-            Some(unlinked_node)
-        }
     }
 }
 
