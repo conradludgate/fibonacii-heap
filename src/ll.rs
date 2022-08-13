@@ -244,4 +244,13 @@ mod tests {
         assert_eq!(ll1.pop_front_node().unwrap().element, 4);
         assert!(ll1.pop_front_node().is_none());
     }
+
+    #[test]
+    fn size() {
+        use std::mem::size_of;
+        const PTR: usize = size_of::<*const ()>();
+        assert_eq!(size_of::<LinkedListTreeInner<()>>(), 3*PTR);
+        assert_eq!(size_of::<LinkedListTree<()>>(), 3*PTR);
+        assert_eq!(size_of::<Node<()>>(), 4*PTR);
+    }
 }
