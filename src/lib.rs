@@ -570,4 +570,3 @@ mod tests {
         check(&mut heap, 0..0);
     }
 }
-

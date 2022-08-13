@@ -69,19 +69,17 @@ impl<T> LinkedListTree<T> {
 
     #[inline]
     pub fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
-        match self.0.take() {
-            Some(mut this) => unsafe {
-                match this.head.as_mut().next.take() {
-                    Some(next_head) => {
-                        let node = std::mem::replace(&mut this.head, next_head);
-                        this.len = NonZeroUsize::new_unchecked(this.len.get() + 1);
-                        self.0 = Some(this);
-                        Some(Box::from_raw(node.as_ptr()))
-                    }
-                    None => Some(Box::from_raw(this.head.as_ptr())),
+        let mut this = self.0.as_mut()?;
+        unsafe {
+            let mut node = Box::from_raw(this.head.as_ptr());
+            match node.next.take() {
+                Some(next) => {
+                    this.head = next;
+                    this.len = NonZeroUsize::new_unchecked(this.len.get() - 1);
                 }
-            },
-            None => None,
+                None => self.0 = None,
+            }
+            Some(node)
         }
     }
 
@@ -193,7 +191,7 @@ mod tests {
         sync::{atomic::AtomicUsize, Arc},
     };
 
-    use crate::ll::{LinkedListTree, Node};
+    use crate::ll::{LinkedListTree, LinkedListTreeInner, Node};
 
     #[test]
     fn drop() {
@@ -249,8 +247,8 @@ mod tests {
     fn size() {
         use std::mem::size_of;
         const PTR: usize = size_of::<*const ()>();
-        assert_eq!(size_of::<LinkedListTreeInner<()>>(), 3*PTR);
-        assert_eq!(size_of::<LinkedListTree<()>>(), 3*PTR);
-        assert_eq!(size_of::<Node<()>>(), 4*PTR);
+        assert_eq!(size_of::<LinkedListTreeInner<()>>(), 3 * PTR);
+        assert_eq!(size_of::<LinkedListTree<()>>(), 3 * PTR);
+        assert_eq!(size_of::<Node<()>>(), 4 * PTR);
     }
 }
