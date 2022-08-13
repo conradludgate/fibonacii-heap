@@ -356,13 +356,9 @@ impl<T: Ord> Heap<T> {
         // Safety: we just incremented it by 1 so we know it's >0
         let len = unsafe { NonZeroUsize::new_unchecked(self.len) };
         self.scratch.reserve(len);
-        self.insert_node(Box::new(ll::Node::new(t)));
-    }
 
-    fn insert_node(&mut self, node: Box<ll::Node<T>>) {
-        // Note: we don't increment the length here, since this is also used when reinserting deep nested nodes
-        let new_min = !matches!(self.peek(), Some(min) if min <= node.get());
-        let node = self.children.push_back_node(node);
+        let new_min = !matches!(self.peek(), Some(min) if *min <= t);
+        let node = self.children.push_back_node(Box::new(ll::Node::new(t)));
         if new_min {
             self.minimum = Some(node);
         }
@@ -432,6 +428,7 @@ impl<T: Ord> Heap<T> {
         let value = self.phase1()?;
         self.phase2();
         self.phase3();
+        debug_assert_eq!(self.scratch.space.iter().flatten().count(), 0);
         Some(value)
     }
 
@@ -453,6 +450,12 @@ impl<T: Ord> Heap<T> {
     }
 
     fn phase2(&mut self) {
+        debug_assert_eq!(
+            self.scratch.space.iter().flatten().count(),
+            0,
+            "scratch space should be empty before phase2"
+        );
+
         while let Some(mut current) = self.children.pop_front_node() {
             loop {
                 let d = self.scratch.space(current.degree());
@@ -467,11 +470,14 @@ impl<T: Ord> Heap<T> {
                 }
             }
         }
-
-        debug_assert!(self.children.is_empty());
     }
 
     fn phase3(&mut self) {
+        debug_assert!(
+            self.children.is_empty(),
+            "children should be empty before phase3"
+        );
+
         let mut iter = self.scratch.space.iter_mut().filter_map(Option::take);
 
         if let Some(node) = iter.next() {
@@ -486,8 +492,21 @@ impl<T: Ord> Heap<T> {
             }
             self.minimum = Some(min);
         };
+    }
+}
 
-        debug_assert_eq!(self.scratch.space.iter().flatten().count(), 0);
+impl<T: Ord> Extend<T> for Heap<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for i in iter {
+            self.push(i);
+        }
+    }
+}
+impl<T: Ord> FromIterator<T> for Heap<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut heap = Heap::new();
+        heap.extend(iter);
+        heap
     }
 }
 
@@ -497,21 +516,79 @@ mod tests {
 
     use super::Heap;
 
-    #[test]
-    fn works() {
-        let mut heap = Heap::default();
-        let mut elems: Vec<_> = (0..100).collect();
-        elems.shuffle(&mut thread_rng());
-        for i in elems {
-            heap.push(i);
-        }
-
-        for i in 0..100 {
+    #[track_caller]
+    fn check(heap: &mut Heap<usize>, n: usize) {
+        assert_eq!(heap.len(), n);
+        for i in 0..n {
             assert_eq!(heap.peek(), Some(&i));
             assert_eq!(heap.pop(), Some(i));
         }
 
         assert_eq!(heap.peek(), None);
         assert_eq!(heap.pop(), None);
+    }
+
+    #[test]
+    fn works() {
+        const N: usize = 100;
+
+        let mut heap = Heap::default();
+        let mut elems: Vec<_> = (0..N).collect();
+        elems.shuffle(&mut thread_rng());
+        for i in elems {
+            heap.push(i);
+        }
+
+        check(&mut heap, N);
+    }
+
+    #[test]
+    /// Tests merging with the left hand side already with the minimum node
+    fn merge_left() {
+        const N: usize = 200;
+
+        let (mut even, mut odds): (Heap<_>, Heap<_>) = (0..N).partition(|i| i % 2 == 0);
+        even.merge(&mut odds);
+
+        check(&mut even, N);
+        check(&mut odds, 0);
+    }
+
+    #[test]
+    /// Tests merging with the left hand side already with the minimum node
+    fn merge_right() {
+        const N: usize = 200;
+
+        let (mut even, mut odds): (Heap<_>, Heap<_>) = (0..N).partition(|i| i % 2 == 0);
+        odds.merge(&mut even);
+
+        check(&mut even, 0);
+        check(&mut odds, N);
+    }
+
+    #[test]
+    /// Tests merging with the left hand side already with the minimum node
+    fn merge_right_empty() {
+        const N: usize = 100;
+
+        let mut heap: Heap<_> = (0..N).collect();
+        let mut empty = Heap::new();
+        heap.merge(&mut empty);
+
+        check(&mut heap, N);
+        check(&mut empty, 0);
+    }
+
+    #[test]
+    /// Tests merging with the left hand side already with the minimum node
+    fn merge_left_empty() {
+        const N: usize = 100;
+
+        let mut heap: Heap<_> = (0..N).collect();
+        let mut empty = Heap::new();
+        empty.merge(&mut heap);
+
+        check(&mut empty, N);
+        check(&mut heap, 0);
     }
 }
