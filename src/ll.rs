@@ -4,24 +4,23 @@
 //! This differs from [`std::collections::LinkedList`] because
 //! [`Node`] contains children as a sub-linked list.
 
-use std::{fmt, marker::PhantomData, mem, ptr::NonNull};
+use std::{marker::PhantomData, mem, ptr::NonNull};
 
 pub struct Node<T> {
     children: LinkedListTree<T>,
     // unused atm, for decrease_key
-    _marked: bool,
-
+    // _marked: bool,
     next: Option<NonNull<Node<T>>>,
     prev: Option<NonNull<Node<T>>>,
 
     element: T,
 }
 
-impl<T: Ord> Node<T> {
+impl<T> Node<T> {
     pub const fn new(t: T) -> Self {
         Self {
             children: LinkedListTree::new(),
-            _marked: false,
+            // _marked: false,
             element: t,
             next: None,
             prev: None,
@@ -30,14 +29,6 @@ impl<T: Ord> Node<T> {
 
     pub fn degree(&self) -> usize {
         self.children.len()
-    }
-
-    /// Merges two nodes, preserving the minimum-heap property
-    pub fn merge(&mut self, mut other: Box<Self>) {
-        if self.element > other.element {
-            std::mem::swap(self, &mut other);
-        }
-        self.children.push_back_node(other);
     }
 
     pub fn into_inner(self) -> T {
@@ -49,17 +40,22 @@ impl<T: Ord> Node<T> {
     }
 }
 
+impl<T: Ord> Node<T> {
+    /// Merges two nodes, preserving the minimum-heap property
+    pub fn merge(mut self: Box<Self>, mut other: Box<Self>) -> Box<Self> {
+        if self.element > other.element {
+            std::mem::swap(&mut self, &mut other);
+        }
+        self.children.push_back_node(other);
+        self
+    }
+}
+
 pub struct LinkedListTree<T> {
     head: Option<NonNull<Node<T>>>,
     tail: Option<NonNull<Node<T>>>,
     len: usize,
     marker: PhantomData<Box<Node<T>>>,
-}
-
-impl<T> Default for LinkedListTree<T> {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl<T> LinkedListTree<T> {
@@ -78,6 +74,14 @@ impl<T> LinkedListTree<T> {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn first(&self) -> Option<&T> {
+        self.head.map(|p| {
+            // SAFETY: We have shared ref of the entire heap -
+            // so we know that no one is mutating this pointer
+            unsafe { p.as_ref().get() }
+        })
     }
 
     pub fn append(&mut self, other: &mut Self) {
@@ -104,7 +108,8 @@ impl<T> LinkedListTree<T> {
     }
 
     /// Adds the given node to the back of the list.
-    pub fn push_back_node(&mut self, mut node: Box<Node<T>>) -> NonNull<Node<T>> {
+    #[inline]
+    pub fn push_back_node(&mut self, mut node: Box<Node<T>>) {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
         unsafe {
@@ -115,16 +120,35 @@ impl<T> LinkedListTree<T> {
             match self.tail {
                 None => self.head = node,
                 // Not creating new mutable (unique!) references overlapping `element`.
-                Some(tail) => (*tail.as_ptr()).next = node,
+                Some(mut tail) => tail.as_mut().next = node,
             }
 
             self.tail = node;
             self.len += 1;
-
-            node.unwrap_unchecked()
         }
     }
 
+    /// Adds the given node to the front of the list.
+    ///
+    /// # Safety:
+    /// The list must have at least 1 element
+    #[inline]
+    unsafe fn push_front_node(&mut self, mut node: Box<Node<T>>) {
+        debug_assert!(!self.is_empty());
+
+        // This method takes care not to create mutable references to whole nodes,
+        // to maintain validity of aliasing pointers into `element`.
+        node.next = self.head;
+        node.prev = None;
+        let node = Box::leak(node).into();
+
+        // Not creating new mutable (unique!) references overlapping `element`.
+        self.head.replace(node).unwrap_unchecked().as_mut().prev = Some(node);
+
+        self.len += 1;
+    }
+
+    #[inline]
     pub fn pop_front_node(&mut self) -> Option<Box<Node<T>>> {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
@@ -135,56 +159,25 @@ impl<T> LinkedListTree<T> {
             match self.head {
                 None => self.tail = None,
                 // Not creating new mutable (unique!) references overlapping `element`.
-                Some(head) => (*head.as_ptr()).prev = None,
+                Some(mut head) => head.as_mut().prev = None,
             }
 
             self.len -= 1;
             node
         })
     }
+}
 
-    /// removes the node from the linked list
-    ///
-    /// # Safety
-    ///
-    /// node must be an element within the linked list
-    pub unsafe fn remove_node(&mut self, node: NonNull<Node<T>>) -> Box<Node<T>> {
-        self.unlink_node(node);
-        Box::from_raw(node.as_ptr())
-    }
-
-    /// Provides a cursor with editing operations at the front element.
-    ///
-    /// The cursor is pointing to the "ghost" non-element if the list is empty.
-    pub fn cursor_front(&self) -> Cursor<'_, T> {
-        Cursor {
-            current: self.head,
-            list: self,
+impl<T: Ord> LinkedListTree<T> {
+    /// inserts the node into the linked list. Preserving the min heap proprety
+    pub fn insert_node(&mut self, node: Box<Node<T>>) {
+        match self.first() {
+            // push front if this is the new min
+            // safety: list has at least one node
+            Some(min) if min > node.get() => unsafe { self.push_front_node(node) },
+            // push back if we already have our min
+            _ => self.push_back_node(node),
         }
-    }
-
-    /// Unlinks the specified node from the current list.
-    ///
-    /// Warning: this will not check that the provided node belongs to the current list.
-    ///
-    /// This method takes care not to create mutable references to `element`, to
-    /// maintain validity of aliasing pointers.
-    unsafe fn unlink_node(&mut self, mut node: NonNull<Node<T>>) {
-        let node = node.as_mut();
-
-        // Not creating new mutable (unique!) references overlapping `element`.
-        match node.prev {
-            Some(mut prev) => prev.as_mut().next = node.next,
-            // this node is the head node
-            None => self.head = node.next,
-        };
-
-        match node.next {
-            Some(mut next) => next.as_mut().prev = node.prev,
-            // this node is the tail node
-            None => self.tail = node.prev,
-        };
-        self.len -= 1;
     }
 }
 
@@ -200,73 +193,41 @@ impl<T> Drop for LinkedListTree<T> {
             }
         }
 
-        while let Some(node) = self.pop_front_node() {
-            let guard = DropGuard(self);
-            drop(node);
-            mem::forget(guard);
-        }
+        let guard = DropGuard(self);
+        while guard.0.pop_front_node().is_some() {}
+        mem::forget(guard);
     }
 }
 
-/// A cursor over a `LinkedList` with editing operations.
-///
-/// A `Cursor` is like an iterator, except that it can freely seek back-and-forth, and can
-/// safely mutate the list during iteration. This is because the lifetime of its yielded
-/// references is tied to its own lifetime, instead of just the underlying list. This means
-/// cursors cannot yield multiple elements at once.
-///
-/// Cursors always rest between two elements in the list, and index in a logically circular way.
-/// To accommodate this, there is a "ghost" non-element that yields `None` between the head and
-/// tail of the list.
-pub struct Cursor<'a, T: 'a> {
-    current: Option<NonNull<Node<T>>>,
-    list: &'a LinkedListTree<T>,
-}
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::LinkedList,
+        panic::catch_unwind,
+        sync::{atomic::AtomicUsize, Arc},
+    };
 
-impl<'a, T> Cursor<'a, T> {
-    /// Moves the cursor to the next element of the `LinkedList`.
-    ///
-    /// If the cursor is pointing to the "ghost" non-element then this will move it to
-    /// the first element of the `LinkedList`. If it is pointing to the last
-    /// element of the `LinkedList` then this will move it to the "ghost" non-element.
-    pub fn move_next(&mut self) {
-        match self.current.take() {
-            // We had no current element; the cursor was sitting at the start position
-            // Next element should be the head of the list
-            None => {
-                self.current = self.list.head;
+    #[test]
+    fn drop() {
+        #[derive(Default, Clone)]
+        struct D(Arc<AtomicUsize>);
+        impl Drop for D {
+            fn drop(&mut self) {
+                assert_ne!(
+                    self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                    0,
+                    "panic in drop"
+                );
             }
-            // We had a previous element, so let's go to its next
-            Some(current) => unsafe {
-                self.current = current.as_ref().next;
-            },
         }
-    }
+        let d = D::default();
+        let mut ll = LinkedList::new();
+        ll.push_back(d.clone());
+        ll.push_back(d.clone());
 
-    pub fn current_node(&self) -> Option<&'a Node<T>> {
-        unsafe { self.current.map(|current| &(*current.as_ptr())) }
-    }
-}
+        catch_unwind(|| std::mem::drop(ll)).unwrap_err();
 
-impl<T: fmt::Debug> fmt::Debug for LinkedListTree<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut list = f.debug_list();
-        let mut cursor = self.cursor_front();
-        while let Some(c) = cursor.current_node() {
-            list.entry(c);
-            cursor.move_next();
-        }
-        list.finish()
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for Node<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Node")
-            .field("element", &self.element)
-            .field("children", &self.children)
-            .field("next", &self.next)
-            .field("prev", &self.prev)
-            .finish()
+        // both were still dropped, despite the panic
+        assert_eq!(d.0.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

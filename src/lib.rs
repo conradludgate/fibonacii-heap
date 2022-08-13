@@ -118,8 +118,6 @@
 //! }
 //! ```
 
-use std::{num::NonZeroUsize, ptr::NonNull};
-
 mod ll;
 
 /// A priority queue implemented with a fibonacii heap.
@@ -204,7 +202,6 @@ mod ll;
 /// [peek\_mut]: Heap::peek_mut
 pub struct Heap<T> {
     children: ll::LinkedListTree<T>,
-    minimum: Option<NonNull<ll::Node<T>>>,
     scratch: Scratch<Box<ll::Node<T>>>,
     len: usize,
 }
@@ -217,26 +214,20 @@ impl<T> Default for Heap<T> {
 struct Scratch<T> {
     space: Vec<Option<T>>,
 }
-impl<T> Default for Scratch<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 impl<T> Scratch<T> {
     const fn new() -> Self {
         Self { space: Vec::new() }
     }
 
-    fn reserve(&mut self, n: NonZeroUsize) {
+    fn reserve(&mut self, n: usize) {
         // A heap with `n` elements should have max-degree log2(n)+1.
         // This quantity can break if we get unlucky and remove only the small
         // degree nodes and leave large degree nodes unchecked.
         // This isn't a problem here though since we never decrease the space
         let new_len = (usize::BITS - n.leading_zeros()) as usize;
-        if new_len > self.space.len() {
-            self.space.resize_with(new_len, || None);
-        }
+        let new_len = new_len.max(self.space.len());
+        self.space.resize_with(new_len, || None);
     }
 
     fn space(&mut self, d: usize) -> &mut Option<T> {
@@ -250,7 +241,6 @@ impl<T> Heap<T> {
     pub const fn new() -> Self {
         Self {
             children: ll::LinkedListTree::new(),
-            minimum: None,
             scratch: Scratch::new(),
             len: 0,
         }
@@ -324,11 +314,7 @@ impl<T: Ord> Heap<T> {
     /// Cost is *O*(1) in the worst case.
     #[must_use]
     pub fn peek(&self) -> Option<&T> {
-        self.minimum.map(|p| {
-            // SAFETY: We have shared ref of the entire heap -
-            // so we know that no one is mutating this pointer
-            unsafe { p.as_ref().get() }
-        })
+        self.children.first()
     }
 
     /// Pushes an item onto the binary heap.
@@ -352,16 +338,10 @@ impl<T: Ord> Heap<T> {
     ///
     /// Cost is *O*(1) in the worst case.
     pub fn push(&mut self, t: T) {
+        let node = Box::new(ll::Node::new(t));
+        self.scratch.reserve(self.len + 1);
+        self.children.insert_node(node);
         self.len += 1;
-        // Safety: we just incremented it by 1 so we know it's >0
-        let len = unsafe { NonZeroUsize::new_unchecked(self.len) };
-        self.scratch.reserve(len);
-
-        let new_min = !matches!(self.peek(), Some(min) if *min <= t);
-        let node = self.children.push_back_node(Box::new(ll::Node::new(t)));
-        if new_min {
-            self.minimum = Some(node);
-        }
     }
 
     /// Moves all the elements of `other` into `self`, leaving `other` empty.
@@ -377,14 +357,10 @@ impl<T: Ord> Heap<T> {
                     std::mem::swap(self, other);
                 }
                 self.children.append(&mut other.children);
-
+                self.scratch.reserve(self.len + other.len);
                 self.len += other.len;
-                // Safety: we just incremented so we know it's >0
-                let len = unsafe { NonZeroUsize::new_unchecked(self.len) };
-                self.scratch.reserve(len);
 
                 other.len = 0;
-                other.minimum = None;
             }
             // if other has values but self does not,
             // swap the whole heaps to make other empty as promised.
@@ -432,66 +408,58 @@ impl<T: Ord> Heap<T> {
         Some(value)
     }
 
+    /// phase2 - remove the minimum node
     fn phase1(&mut self) -> Option<Box<ll::Node<T>>> {
-        match self.minimum.take() {
-            Some(min) => {
-                // SAFETY: minimum is guaranteed to be within the linked list
-                let mut value = unsafe { self.children.remove_node(min) };
-                self.len -= 1;
-
-                self.children.append_from_node(&mut value);
-
-                debug_assert_eq!(value.degree(), 0);
-
-                Some(value)
-            }
-            None => None,
-        }
+        self.children.pop_front_node().map(|mut value| {
+            self.len -= 1;
+            self.children.append_from_node(&mut value);
+            debug_assert_eq!(value.degree(), 0);
+            value
+        })
     }
 
+    /// phase2 - merge top level nodes with the same degree (to keep the heap logarithmic in size)
     fn phase2(&mut self) {
-        debug_assert_eq!(
-            self.scratch.space.iter().flatten().count(),
-            0,
+        fn merge_or_insert<T: Ord>(
+            current: Box<ll::Node<T>>,
+            d: &mut Option<Box<ll::Node<T>>>,
+        ) -> Option<Box<ll::Node<T>>> {
+            // if we have a duplicate degree, then remove and merge
+            // else store the current node at that degree
+            if let Some(v) = d.take() {
+                Some(current.merge(v))
+            } else {
+                d.replace(current)
+            }
+        }
+
+        debug_assert!(
+            self.scratch.space.iter().flatten().next().is_none(),
             "scratch space should be empty before phase2"
         );
 
         while let Some(mut current) = self.children.pop_front_node() {
             loop {
                 let d = self.scratch.space(current.degree());
-
-                // if we have a duplicate degree, then remove and merge
-                // else store the current node at that degree
-                if let Some(v) = d.take() {
-                    current.merge(v);
+                if let Some(c) = merge_or_insert(current, d) {
+                    current = c;
                 } else {
-                    *d = Some(current);
                     break;
                 }
             }
         }
     }
 
+    /// phase3 - rebuild the heap (finding the new minimum node in the process)
     fn phase3(&mut self) {
         debug_assert!(
             self.children.is_empty(),
             "children should be empty before phase3"
         );
 
-        let mut iter = self.scratch.space.iter_mut().filter_map(Option::take);
-
-        if let Some(node) = iter.next() {
-            let mut min = self.children.push_back_node(node);
-            for node in iter {
-                let first = unsafe { min.as_ref().get() };
-                let new_min = first > node.get();
-                let node = self.children.push_back_node(node);
-                if new_min {
-                    min = node;
-                }
-            }
-            self.minimum = Some(min);
-        };
+        for node in self.scratch.space.iter_mut().filter_map(Option::take) {
+            self.children.insert_node(node);
+        }
     }
 }
 
@@ -512,18 +480,23 @@ impl<T: Ord> FromIterator<T> for Heap<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use rand::{seq::SliceRandom, thread_rng};
 
     use super::Heap;
 
     #[track_caller]
-    fn check(heap: &mut Heap<usize>, n: usize) {
-        assert_eq!(heap.len(), n);
-        for i in 0..n {
-            assert_eq!(heap.peek(), Some(&i));
-            assert_eq!(heap.pop(), Some(i));
+    fn check<T: Ord + Debug>(heap: &mut Heap<T>, elems: impl IntoIterator<Item = T>) {
+        let elems = elems.into_iter();
+        let n = elems.size_hint().1.unwrap();
+        for (i, elem) in elems.enumerate() {
+            assert_eq!(heap.len(), n - i);
+            assert_eq!(heap.peek(), Some(&elem));
+            assert_eq!(heap.pop(), Some(elem));
         }
 
+        assert!(heap.is_empty());
         assert_eq!(heap.peek(), None);
         assert_eq!(heap.pop(), None);
     }
@@ -539,7 +512,23 @@ mod tests {
             heap.push(i);
         }
 
-        check(&mut heap, N);
+        check(&mut heap, 0..N);
+    }
+
+    #[test]
+    fn duplicates() {
+        const N: usize = 10;
+        let mut heap = Heap::default();
+        let mut elems = vec![];
+
+        for i in 0..N {
+            for j in 0..N {
+                elems.push(i);
+                heap.push(j);
+            }
+        }
+
+        check(&mut heap, elems);
     }
 
     #[test]
@@ -550,8 +539,8 @@ mod tests {
         let (mut even, mut odds): (Heap<_>, Heap<_>) = (0..N).partition(|i| i % 2 == 0);
         even.merge(&mut odds);
 
-        check(&mut even, N);
-        check(&mut odds, 0);
+        check(&mut even, 0..N);
+        check(&mut odds, 0..0);
     }
 
     #[test]
@@ -562,8 +551,8 @@ mod tests {
         let (mut even, mut odds): (Heap<_>, Heap<_>) = (0..N).partition(|i| i % 2 == 0);
         odds.merge(&mut even);
 
-        check(&mut even, 0);
-        check(&mut odds, N);
+        check(&mut even, 0..0);
+        check(&mut odds, 0..N);
     }
 
     #[test]
@@ -575,8 +564,8 @@ mod tests {
         let mut empty = Heap::new();
         heap.merge(&mut empty);
 
-        check(&mut heap, N);
-        check(&mut empty, 0);
+        check(&mut heap, 0..N);
+        check(&mut empty, 0..0);
     }
 
     #[test]
@@ -588,7 +577,7 @@ mod tests {
         let mut empty = Heap::new();
         empty.merge(&mut heap);
 
-        check(&mut empty, N);
-        check(&mut heap, 0);
+        check(&mut empty, 0..N);
+        check(&mut heap, 0..0);
     }
 }
